@@ -1,0 +1,123 @@
+<div align="center">
+
+```
+███╗   ███╗ █████╗  ██████╗██╗  ██╗██╗   ██╗███╗   ██╗████████╗
+████╗ ████║██╔══██╗██╔════╝██║  ██║██║   ██║████╗  ██║╚══██╔══╝
+██╔████╔██║███████║██║     ███████║██║   ██║██╔██╗ ██║   ██║
+██║╚██╔╝██║██╔══██║██║     ██╔══██║██║   ██║██║╚██╗██║   ██║
+██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝██║ ╚████║   ██║
+╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝
+```
+
+### 🛡️ macOS Threat Hunting &amp; Compromise Assessment
+
+**A read-only scanner that hunts where macOS malware actually hides — and never touches a thing.**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg?style=flat-square)](LICENSE)
+[![Platform](https://img.shields.io/badge/macOS-12%E2%80%9315-000000.svg?style=flat-square&logo=apple)](#)
+[![Shell](https://img.shields.io/badge/Pure_Bash-no_dependencies-4EAA25.svg?style=flat-square&logo=gnubash&logoColor=white)](#)
+[![Read Only](https://img.shields.io/badge/Mode-100%25_read--only-0ea5e9.svg?style=flat-square)](#-safety-first)
+[![Maintainer](https://img.shields.io/badge/by-Mobin_Erteghaie-8b5cf6.svg?style=flat-square)](https://github.com/mobinert)
+
+</div>
+
+---
+
+## ⚡ Quick start
+
+```bash
+git clone https://github.com/mobinert/machunt.git
+cd machunt
+chmod +x machunt.sh
+
+./machunt.sh          # user-level scan
+sudo ./machunt.sh     # full scan — system daemons, all ports, TCC
+```
+
+A timestamped report is saved to your home folder **and copied to your Desktop**.
+
+---
+
+## 🎯 Why machunt?
+
+Antivirus looks for *known* files. **machunt looks for the techniques** — the launch agents, signature anomalies, rogue DNS, and privacy grants that real macOS implants rely on. It assumes nothing, verifies the code signature of every persistence target, and tells you **exactly what to look at** without ever deleting, quarantining, or "fixing" anything behind your back.
+
+> **A `[FLAG]` means *"look at this"*, not *"this is malware."*** You stay in control of every decision.
+
+---
+
+## 🔍 What it scans
+
+| # | Module | What it catches |
+|---|--------|-----------------|
+| 1 | **Security posture** | SIP, FileVault, Firewall, Gatekeeper, Remote Login, Screen Sharing |
+| 2 | **LaunchAgents / Daemons** | Every persistence plist — with **code-signature verification** of its target |
+| 3 | **Login items &amp; background tasks** | `sfltool` background items, login-item helpers |
+| 4 | **Cron · periodic · at · hooks · emond** | Classic & legacy scheduled-execution backdoors |
+| 5 | **Configuration profiles** | MDM / stalkerware forced proxies, certs, locked settings |
+| 6 | **Kernel &amp; system extensions** | Non-Apple kexts and active system extensions |
+| 7 | **Running processes** | Live binaries that are unsigned or run from temp/shared dirs |
+| 8 | **Network** | Listening ports + established outbound — *who is your Mac talking to?* |
+| 9 | **DNS · hosts · proxy** | Traffic-hijacking redirects and silent interception |
+| 10 | **Browser extensions** | Safari + Chromium adware / hijackers |
+| 11 | **SUID / SGID binaries** | Privilege-escalation backdoors in writable paths |
+| 12 | **Recently modified files** | Changes in persistence/config dirs (last 7 days) |
+| 13 | **Shell &amp; environment** | Download-and-execute / reverse-shell lines in `*.rc` files |
+| 14 | **Known-malware IOCs** | Documented bad paths + "masquerades-as-Apple" heuristic |
+| 15 | **Privacy permissions (TCC)** 🆕 | Which apps hold **camera / mic / screen / full-disk** — the top spyware tell |
+| 16 | **Quarantine / downloads** 🆕 | Recently downloaded executables and *where they came from* |
+| 17 | **Baseline diff** 🆕 | Fingerprints persistence and **alerts on anything new** between runs |
+
+---
+
+## 🧪 The signature model (the core idea)
+
+For every auto-run binary, machunt classifies the code signature:
+
+| Verdict | Meaning |
+|---------|---------|
+| 🟢 `Apple-signed` | Shipped by Apple — expected |
+| 🔵 `Developer ID` | A real vendor — *confirm it's one you installed* |
+| 🔴 `ad-hoc` / `unsigned` / `invalid` | **Common in malware — investigate** |
+
+---
+
+## 🛟 Safety first
+
+- **Read-only by design.** No `rm`, no `kill`, no quarantine, no config changes — ever.
+- **No dependencies.** Pure `bash` + tools already on macOS. Nothing is installed.
+- **Nothing leaves your Mac.** No network calls, no telemetry. The report is yours alone.
+- `.gitignore` keeps your own scan reports and baseline **out of git** by default.
+
+---
+
+## 📋 Reading the results
+
+After a scan, work through the flags top-to-bottom. Most flags on a healthy Mac are benign (your VPN, a Developer-ID utility, your own SSH). For anything unfamiliar:
+
+```bash
+shasum -a 256 /path/to/suspicious/binary    # then look the hash up on VirusTotal
+```
+
+### Recommended companions
+- **[Objective-See](https://objective-see.org)** — KnockKnock (persistence), **LuLu** (outbound firewall), BlockBlock (live alerts). The gold standard, free.
+- **Malwarebytes for Mac** — quick known-adware cleanup.
+
+---
+
+## 🗺️ Roadmap
+
+- [ ] `--json` machine-readable output
+- [ ] HTML report with severity grouping
+- [ ] Unified-log triage for suspicious `execve` events
+- [ ] Wi-Fi / ARP anomaly check
+
+---
+
+## 📄 License
+
+[MIT](LICENSE) © 2026 **Mobin Erteghaie**
+
+<div align="center">
+<sub>Built for defenders. Use only on systems you own or are authorized to assess.</sub>
+</div>

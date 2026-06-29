@@ -1,0 +1,16 @@
+# Scan output — never commit your own machine's report
+machunt_report_*.txt
+.machunt_baseline.txt
+
+# macOS cruft
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Editor / temp
+*.swp
+*.tmp
+*~
+.idea/
+.vscode/
