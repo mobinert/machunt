@@ -32,9 +32,10 @@ chmod +x machunt.sh
 
 ./machunt.sh          # user-level scan
 sudo ./machunt.sh     # full scan — system daemons, all ports, TCC
+./machunt.sh --json   # also emit a machine-readable summary
 ```
 
-A timestamped report is saved to your home folder **and copied to your Desktop**.
+The timestamped report is saved **in the directory you run the tool from**, and a copy is placed on your **Desktop** (disable with `--no-desktop`). Add `--json` for a `machunt_summary_*.json` alongside it.
 
 ---
 
@@ -66,7 +67,12 @@ Antivirus looks for *known* files. **machunt looks for the techniques** — the 
 | 14 | **Known-malware IOCs** | Documented bad paths + "masquerades-as-Apple" heuristic |
 | 15 | **Privacy permissions (TCC)** 🆕 | Which apps hold **camera / mic / screen / full-disk** — the top spyware tell |
 | 16 | **Quarantine / downloads** 🆕 | Recently downloaded executables and *where they came from* |
-| 17 | **Baseline diff** 🆕 | Fingerprints persistence and **alerts on anything new** between runs |
+| 17 | **Baseline diff** | Fingerprints persistence and **alerts on anything new** between runs |
+| 18 | **Local accounts &amp; sudo** 🆕 | Admin/hidden users + passwordless-sudo (`/etc/sudoers.d`) backdoors |
+| 19 | **SSH trust** 🆕 | Planted keys in `authorized_keys` = silent persistent remote access |
+| 20 | **Network neighborhood** 🆕 | Default gateway, ARP table &amp; duplicate-MAC **MITM / ARP-spoof** check |
+
+Run `./machunt.sh --help` for all options.
 
 ---
 
@@ -107,10 +113,11 @@ shasum -a 256 /path/to/suspicious/binary    # then look the hash up on VirusTota
 
 ## 🗺️ Roadmap
 
-- [ ] `--json` machine-readable output
+- [x] `--json` machine-readable output
+- [x] Wi-Fi / ARP anomaly check
 - [ ] HTML report with severity grouping
 - [ ] Unified-log triage for suspicious `execve` events
-- [ ] Wi-Fi / ARP anomaly check
+- [ ] Optional notarization (`spctl`) check per binary
 
 ---
 

@@ -21,10 +21,48 @@
 # files) and we want to keep scanning and report what we can.
 set -o pipefail 2>/dev/null
 
+# ----- Command-line options ------------------------------------------
+WANT_JSON=0
+NO_DESKTOP=0
+for arg in "$@"; do
+  case "$arg" in
+    --json)        WANT_JSON=1 ;;
+    --no-desktop)  NO_DESKTOP=1 ;;
+    -h|--help)
+      cat <<'EOF'
+machunt — macOS Threat Hunt & Compromise Assessment (read-only)
+
+Usage:
+  ./machunt.sh [options]
+  sudo ./machunt.sh [options]      # deeper coverage (system daemons, TCC, ports)
+
+Options:
+  --json          Also write a machine-readable JSON summary of findings
+  --no-desktop    Do not place a copy of the report on the Desktop
+  -h, --help      Show this help
+
+The full text report is saved in the directory you run the tool from,
+and (unless --no-desktop) a copy is placed on your Desktop.
+EOF
+      exit 0 ;;
+    *) printf 'Unknown option: %s (try --help)\n' "$arg" >&2; exit 2 ;;
+  esac
+done
+
 # ----- Output setup --------------------------------------------------
 TS="$(date +%Y%m%d_%H%M%S)"
-REPORT="${HOME}/machunt_report_${TS}.txt"
-FLAGS=0   # count of things that warrant your attention
+# Save the report in the directory the tool is run from (the current
+# working directory), not the home folder.
+RUN_DIR="$(pwd)"
+REPORT="${RUN_DIR}/machunt_report_${TS}.txt"
+: > "$REPORT" 2>/dev/null || { echo "Cannot write report to $RUN_DIR — run from a writable directory."; exit 1; }
+
+# Findings are recorded to temp files so that counts survive subshells
+# (many probes run inside pipes / while-read loops).
+FLAGS_FILE="$(mktemp "${TMPDIR:-/tmp}/machunt_flags.XXXXXX")"
+WARN_FILE="$(mktemp "${TMPDIR:-/tmp}/machunt_warns.XXXXXX")"
+cleanup() { rm -f "$FLAGS_FILE" "$WARN_FILE" 2>/dev/null; }
+trap cleanup EXIT
 
 # Colors (only when writing to a terminal)
 if [ -t 1 ]; then
@@ -38,8 +76,8 @@ log() { printf '%s\n' "$*" | tee -a "$REPORT" >/dev/null; printf '%s\n' "$*"; }
 section() { log ""; log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"; log "${BOLD}${B}  $*${N}"; log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"; }
 ok()    { log "  ${G}[ ok ]${N} $*"; }
 info()  { log "  ${C}[info]${N} $*"; }
-warn()  { log "  ${Y}[ ?? ]${N} $*"; FLAGS=$((FLAGS+1)); }
-alert() { log "  ${R}[FLAG]${N} $*"; FLAGS=$((FLAGS+1)); }
+warn()  { log "  ${Y}[ ?? ]${N} $*"; printf '%s\n' "$*" >> "$WARN_FILE"; }
+alert() { log "  ${R}[FLAG]${N} $*"; printf '%s\n' "$*" >> "$FLAGS_FILE"; }
 
 IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
@@ -229,15 +267,14 @@ ps -axo pid=,user=,comm= 2>/dev/null | while read -r pid user comm; do
   sig="$(check_sig "$comm")"
   case "$sig" in
     unsigned|adhoc|invalid)
-      log "  ${R}[FLAG]${N} pid $pid ($user): $comm  [$sig]"
+      alert "pid $pid ($user): $comm  [$sig]"
       ;;
   esac
   case "$comm" in
     /tmp/*|/private/tmp/*|/var/tmp/*|/Users/Shared/*|*/.Trash/*)
-      log "  ${R}[FLAG]${N} pid $pid ($user) runs from temp/shared: $comm" ;;
+      alert "pid $pid ($user) runs from temp/shared: $comm" ;;
   esac
 done
-FLAGS=$((FLAGS))  # process loop runs in subshell; flags there are visual only
 
 # =====================================================================
 section "8. NETWORK — listening ports & active connections"
@@ -338,7 +375,7 @@ done
 find "$HOME/Library/LaunchAgents" /Library/LaunchAgents /Library/LaunchDaemons -name '*apple*' 2>/dev/null | while read -r f; do
   prog="$(plist_program "$f")"
   [ -n "$prog" ] && [ "$(check_sig "$prog")" != "apple" ] && \
-    log "  ${R}[FLAG]${N} plist masquerades as Apple but target isn't Apple-signed: $f → $prog"
+    alert "plist masquerades as Apple but target isn't Apple-signed: $f → $prog"
 done
 [ $hit -eq 0 ] && ok "No known-bad IOC paths matched"
 
@@ -411,7 +448,89 @@ fi
 rm -f "$CUR"
 
 # =====================================================================
+section "18. LOCAL ACCOUNTS & SUDO PRIVILEGES"
+# Attackers add hidden/admin users or grant themselves passwordless sudo.
+info "Admin-group members (can sudo):"
+dscl . -read /Groups/admin GroupMembership 2>/dev/null | tr ' ' '\n' | grep -v '^GroupMembership:$' | sed 's/^/    /' | tee -a "$REPORT"
+
+info "Real login accounts (UID >= 501):"
+dscl . -list /Users UniqueID 2>/dev/null | awk '$2>=501 {print "    "$1" (uid "$2")"}' | tee -a "$REPORT"
+
+# Hidden users (IsHidden=1) that can still log in are suspicious
+for u in $(dscl . -list /Users 2>/dev/null); do
+  hidden="$(dscl . -read /Users/"$u" IsHidden 2>/dev/null | awk '{print $2}')"
+  shell="$(dscl . -read /Users/"$u" UserShell 2>/dev/null | awk '{print $2}')"
+  uid="$(dscl . -read /Users/"$u" UniqueID 2>/dev/null | awk '{print $2}')"
+  if [ "$hidden" = "1" ] && [ "$uid" -ge 500 ] 2>/dev/null && [ "$shell" != "/usr/bin/false" ] && [ "$shell" != "/sbin/nologin" ]; then
+    alert "Hidden user '$u' (uid $uid) has a real login shell ($shell)"
+  fi
+done
+
+info "Custom sudoers drop-ins (/etc/sudoers.d — Apple ships almost none):"
+if [ $IS_ROOT -eq 1 ]; then
+  for sf in /etc/sudoers.d/*; do
+    [ -e "$sf" ] || continue
+    case "$(basename "$sf")" in README) continue ;; esac
+    if grep -qE 'NOPASSWD|ALL *= *\(ALL' "$sf" 2>/dev/null; then
+      alert "Permissive sudoers rule in $sf:"; grep -vE '^\s*#|^\s*$' "$sf" 2>/dev/null | sed 's/^/        /' | tee -a "$REPORT"
+    else
+      info "    $sf"
+    fi
+  done
+else
+  warn "Run with sudo to inspect /etc/sudoers.d for passwordless-sudo backdoors"
+fi
+
+# =====================================================================
+section "19. SSH TRUST — authorized keys & remote access"
+# A planted public key in authorized_keys is silent, persistent remote access.
+for akf in /var/root/.ssh/authorized_keys "$HOME/.ssh/authorized_keys"; do
+  [ -r "$akf" ] || continue
+  n="$(grep -cvE '^\s*#|^\s*$' "$akf" 2>/dev/null)"
+  if [ "$n" -gt 0 ] 2>/dev/null; then
+    warn "$akf contains $n authorized key(s) — confirm every one is yours:"
+    grep -vE '^\s*#|^\s*$' "$akf" 2>/dev/null | awk '{print "        "$1" ... "$NF}' | tee -a "$REPORT"
+  fi
+done
+[ -r "$HOME/.ssh/authorized_keys" ] || [ -r /var/root/.ssh/authorized_keys ] || ok "No authorized_keys files present (no key-based SSH access configured)"
+
+# =====================================================================
+section "20. NETWORK NEIGHBORHOOD — gateway, ARP & Wi-Fi (MITM check)"
+# A rogue default gateway or spoofed ARP entry = someone intercepting traffic.
+gw="$(route -n get default 2>/dev/null | awk '/gateway:/{print $2}')"
+[ -n "$gw" ] && info "Default gateway: $gw" || info "No default gateway (offline?)"
+
+info "Current Wi-Fi network:"
+ssid="$(ipconfig getsummary en0 2>/dev/null | awk -F' SSID : ' '/ SSID :/{print $2; exit}')"
+[ -n "$ssid" ] && log "    $ssid" || log "    (not on Wi-Fi or undetectable)"
+
+info "ARP neighbors (watch for the gateway IP mapped to an odd/duplicate MAC):"
+arp -an 2>/dev/null | sed 's/^/    /' | tee -a "$REPORT"
+# Duplicate MACs across different IPs can indicate ARP-spoofing
+dupmac="$(arp -an 2>/dev/null | grep -oE '([0-9a-f]{1,2}:){5}[0-9a-f]{1,2}' | sort | uniq -d)"
+[ -n "$dupmac" ] && warn "Same MAC appears for multiple IPs (possible ARP spoofing): $dupmac"
+
+# =====================================================================
 section "SUMMARY"
+# grep -c prints the count (and exits 1 when zero) — capture the number directly.
+FLAGS="$(grep -c . "$FLAGS_FILE" 2>/dev/null)"; FLAGS="${FLAGS:-0}"
+WARNS="$(grep -c . "$WARN_FILE" 2>/dev/null)"; WARNS="${WARNS:-0}"
+log ""
+if [ "$FLAGS" -eq 0 ]; then
+  log "  ${G}${BOLD}No high-severity flags raised in this pass.${N} (${WARNS} lower-priority notes)"
+  log "  That's reassuring but not a clean bill of health — review sections"
+  log "  2, 7, 8 and 9 manually, and re-run with sudo for full coverage."
+else
+  log "  ${R}${BOLD}${FLAGS} item(s) FLAGGED${N} for your review, plus ${WARNS} lower-priority note(s)."
+  log "  A flag means 'look at this', NOT 'definitely malware'. Many are benign"
+  log "  (legit Developer-ID apps, your own SSH, VPN tools). Investigate each:"
+  log "    • Unknown LaunchAgent/Daemon  → look up the label & program path"
+  log "    • Unsigned running process     → identify the app; quit & quarantine if unknown"
+  log "    • Unexpected outbound conn.    → map the remote IP/host to an app you trust"
+  log ""
+  log "  ${BOLD}Flagged items:${N}"
+  sed 's/^/    🚩 /' "$FLAGS_FILE" | tee -a "$REPORT"
+fi
 log ""
 if [ "$FLAGS" -eq 0 ]; then
   log "  ${G}${BOLD}No automatic flags raised in this pass.${N}"
@@ -428,12 +547,36 @@ fi
 log ""
 log "  Full report saved to: ${BOLD}$REPORT${N}"
 
-# Place a copy of the report on the Desktop (per request)
-DESKTOP_COPY="$HOME/Desktop/machunt_report_${TS}.txt"
-if cp "$REPORT" "$DESKTOP_COPY" 2>/dev/null; then
-  log "  ${G}A copy was placed on your Desktop:${N} $DESKTOP_COPY"
-else
-  log "  ${Y}(Could not copy to Desktop — report still saved at the path above)${N}"
+# Place a copy of the report on the Desktop (unless --no-desktop)
+if [ "$NO_DESKTOP" -eq 0 ]; then
+  DESKTOP_COPY="$HOME/Desktop/machunt_report_${TS}.txt"
+  if cp "$REPORT" "$DESKTOP_COPY" 2>/dev/null; then
+    log "  ${G}A copy was placed on your Desktop:${N} $DESKTOP_COPY"
+  else
+    log "  ${Y}(Could not copy to Desktop — report still saved at the path above)${N}"
+  fi
+fi
+
+# Optional machine-readable JSON summary (--json)
+if [ "$WANT_JSON" -eq 1 ]; then
+  JSON="${RUN_DIR}/machunt_summary_${TS}.json"
+  {
+    printf '{\n'
+    printf '  "tool": "machunt",\n'
+    printf '  "host": "%s",\n' "$(scutil --get ComputerName 2>/dev/null || hostname)"
+    printf '  "scanned_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '  "privileged": %s,\n' "$( [ $IS_ROOT -eq 1 ] && echo true || echo false )"
+    printf '  "report_file": "%s",\n' "$REPORT"
+    printf '  "flag_count": %s,\n' "$FLAGS"
+    printf '  "warn_count": %s,\n' "$WARNS"
+    printf '  "flags": [\n'
+    # JSON-escape each flagged line
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$FLAGS_FILE" 2>/dev/null \
+      | awk 'NF{lines[NR]=$0} END{for(i=1;i<=NR;i++){printf "    \"%s\"%s\n", lines[i], (i<NR?",":"")}}'
+    printf '  ]\n'
+    printf '}\n'
+  } > "$JSON"
+  log "  ${G}JSON summary written to:${N} $JSON"
 fi
 log ""
 log "  ${C}Next-step recommendations:${N}"
