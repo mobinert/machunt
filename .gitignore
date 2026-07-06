@@ -1,5 +1,7 @@
 # Scan output — never commit your own machine's report
 machunt_report_*.txt
+machunt_report_*.html
+machunt_summary_*.json
 .machunt_baseline.txt
 
 # macOS cruft

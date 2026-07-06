@@ -32,10 +32,12 @@ chmod +x machunt.sh
 
 ./machunt.sh          # user-level scan
 sudo ./machunt.sh     # full scan — system daemons, all ports, TCC
+./machunt.sh --html   # also emit a designed HTML report (open in any browser)
 ./machunt.sh --json   # also emit a machine-readable summary
+./machunt.sh --deep   # add slower checks (unified-log triage of the last 12h)
 ```
 
-The timestamped report is saved **in the directory you run the tool from**, and a copy is placed on your **Desktop** (disable with `--no-desktop`). Add `--json` for a `machunt_summary_*.json` alongside it.
+The timestamped report is saved **in the directory you run the tool from**, and a copy is placed on your **Desktop** (disable with `--no-desktop`). Add `--html` for a self-contained visual report, or `--json` for a `machunt_summary_*.json`, alongside it. Every run also prints a **0–100 security-posture score** with a letter grade.
 
 ---
 
@@ -70,7 +72,11 @@ Antivirus looks for *known* files. **machunt looks for the techniques** — the 
 | 17 | **Baseline diff** | Fingerprints persistence and **alerts on anything new** between runs |
 | 18 | **Local accounts &amp; sudo** 🆕 | Admin/hidden users + passwordless-sudo (`/etc/sudoers.d`) backdoors |
 | 19 | **SSH trust** 🆕 | Planted keys in `authorized_keys` = silent persistent remote access |
-| 20 | **Network neighborhood** 🆕 | Default gateway, ARP table &amp; duplicate-MAC **MITM / ARP-spoof** check |
+| 20 | **Network neighborhood** | Default gateway, ARP table &amp; duplicate-MAC **MITM / ARP-spoof** check |
+| 21 | **XProtect &amp; update freshness** 🆕 | XProtect / Remediator versions + whether **auto security-data updates** were silently disabled |
+| 22 | **DYLD injection &amp; env persistence** 🆕 | `DYLD_INSERT_LIBRARIES` in launchd items + the legacy `~/.MacOSX/environment.plist` |
+| 23 | **Trusted root certificates** 🆕 | User/admin-added root CAs — the classic **HTTPS interception** backdoor |
+| 24 | **Unified-log triage** 🆕 `--deep` | Last-12h process spawns from temp dirs, `osascript`→shell, pipe-to-shell downloads |
 
 Run `./machunt.sh --help` for all options.
 
@@ -84,9 +90,28 @@ For every auto-run binary, machunt classifies the code signature:
 |---------|---------|
 | 🟢 `Apple-signed` | Shipped by Apple — expected |
 | 🔵 `Developer ID` | A real vendor — *confirm it's one you installed* |
+| 🟡 `Developer ID, NOT notarized` | Signed, but Apple never malware-scanned it — extra scrutiny |
 | 🔴 `ad-hoc` / `unsigned` / `invalid` | **Common in malware — investigate** |
 
+Persistence targets signed with a Developer ID are additionally checked for **notarization** (`spctl`) — Apple's malware scan. A real vendor's tool is almost always notarized; an un-notarized one is worth a second look.
+
 ---
+
+## 📊 Security-posture score
+
+Every run ends with a **0–100 score** and a letter grade, so you can track a machine over time at a glance. It starts at 100 and deducts per finding by severity:
+
+```
+score = 100 − (critical×30 + high×12 + medium×4 + low×1)      # floored at 0
+```
+
+| Severity | Examples |
+|----------|----------|
+| ⛔ **Critical** | SIP or Gatekeeper disabled, a hidden admin user, passwordless-sudo drop-in, a LoginHook, a known-bad IOC path |
+| 🚩 **High** | Unsigned/ad-hoc auto-run binary, a DYLD-injecting launch item, an unexpected trusted root CA |
+| ❓ **Medium** | Firewall off, an un-notarized Developer-ID persistence target, SSH enabled |
+
+The same breakdown is written to the `--html` and `--json` outputs. **A high score is reassuring, not a clean bill of health** — always skim the flagged items yourself.
 
 ## 🛟 Safety first
 
@@ -115,9 +140,13 @@ shasum -a 256 /path/to/suspicious/binary    # then look the hash up on VirusTota
 
 - [x] `--json` machine-readable output
 - [x] Wi-Fi / ARP anomaly check
-- [ ] HTML report with severity grouping
-- [ ] Unified-log triage for suspicious `execve` events
-- [ ] Optional notarization (`spctl`) check per binary
+- [x] HTML report with severity grouping (`--html`)
+- [x] Security-posture score + letter grade
+- [x] Unified-log triage for suspicious spawns (`--deep`)
+- [x] Notarization (`spctl`) check per persistence binary
+- [x] XProtect / update-freshness, DYLD-injection &amp; trusted-cert checks
+- [ ] `--baseline-accept` flag to update the baseline in one step
+- [ ] Optional signed JSON export for fleet/SIEM ingestion
 
 ---
 

@@ -12,6 +12,10 @@
 #   chmod +x machunt.sh
 #   ./machunt.sh                  # scan as your user
 #   sudo ./machunt.sh             # deeper scan (system LaunchDaemons, TCC, etc.)
+#   ./machunt.sh --html --json    # also write a visual HTML report + JSON summary
+#   ./machunt.sh --deep           # add unified-log triage (slower)
+#
+# Every run prints a 0–100 security-posture score with a letter grade.
 #
 # Tested on macOS 12–15 (Intel & Apple Silicon). Pure bash + built-ins,
 # no dependencies, nothing installed.
@@ -23,10 +27,14 @@ set -o pipefail 2>/dev/null
 
 # ----- Command-line options ------------------------------------------
 WANT_JSON=0
+WANT_HTML=0
+WANT_DEEP=0
 NO_DESKTOP=0
 for arg in "$@"; do
   case "$arg" in
     --json)        WANT_JSON=1 ;;
+    --html)        WANT_HTML=1 ;;
+    --deep)        WANT_DEEP=1 ;;
     --no-desktop)  NO_DESKTOP=1 ;;
     -h|--help)
       cat <<'EOF'
@@ -37,12 +45,17 @@ Usage:
   sudo ./machunt.sh [options]      # deeper coverage (system daemons, TCC, ports)
 
 Options:
+  --html          Also write a designed, self-contained HTML report
+                  (score gauge, severity grouping) — open it in any browser
   --json          Also write a machine-readable JSON summary of findings
+  --deep          Enable slower deep checks (unified-log triage of the
+                  last 12h for suspicious process spawns)
   --no-desktop    Do not place a copy of the report on the Desktop
   -h, --help      Show this help
 
 The full text report is saved in the directory you run the tool from,
-and (unless --no-desktop) a copy is placed on your Desktop.
+and (unless --no-desktop) a copy is placed on your Desktop. Every run also
+prints a 0–100 security-posture score with a letter grade.
 EOF
       exit 0 ;;
     *) printf 'Unknown option: %s (try --help)\n' "$arg" >&2; exit 2 ;;
@@ -57,27 +70,46 @@ RUN_DIR="$(pwd)"
 REPORT="${RUN_DIR}/machunt_report_${TS}.txt"
 : > "$REPORT" 2>/dev/null || { echo "Cannot write report to $RUN_DIR — run from a writable directory."; exit 1; }
 
-# Findings are recorded to temp files so that counts survive subshells
-# (many probes run inside pipes / while-read loops).
-FLAGS_FILE="$(mktemp "${TMPDIR:-/tmp}/machunt_flags.XXXXXX")"
-WARN_FILE="$(mktemp "${TMPDIR:-/tmp}/machunt_warns.XXXXXX")"
-cleanup() { rm -f "$FLAGS_FILE" "$WARN_FILE" 2>/dev/null; }
+# Findings are recorded — with a severity and the module that raised them —
+# to a single temp file so that counts and grouping survive subshells (many
+# probes run inside pipes / while-read loops). Format is TAB-delimited:
+#   severity<TAB>module<TAB>message      severity ∈ crit | high | med | low
+FIND_FILE="$(mktemp "${TMPDIR:-/tmp}/machunt_find.XXXXXX")"
+cleanup() { rm -f "$FIND_FILE" 2>/dev/null; }
 trap cleanup EXIT
+
+CURRENT_MODULE="startup"
 
 # Colors (only when writing to a terminal)
 if [ -t 1 ]; then
-  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[34m'; C=$'\e[36m'; BOLD=$'\e[1m'; N=$'\e[0m'
+  R=$'\e[31m'; G=$'\e[32m'; Y=$'\e[33m'; B=$'\e[34m'; C=$'\e[36m'; M=$'\e[35m'; BOLD=$'\e[1m'; N=$'\e[0m'
 else
-  R=""; G=""; Y=""; B=""; C=""; BOLD=""; N=""
+  R=""; G=""; Y=""; B=""; C=""; M=""; BOLD=""; N=""
 fi
 
 # log: echo to screen AND append to report (stripped of color)
 log() { printf '%s\n' "$*" | tee -a "$REPORT" >/dev/null; printf '%s\n' "$*"; }
-section() { log ""; log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"; log "${BOLD}${B}  $*${N}"; log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"; }
+section() {
+  CURRENT_MODULE="$*"
+  log ""
+  log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"
+  log "${BOLD}${B}  $*${N}"
+  log "${BOLD}${B}══════════════════════════════════════════════════════════════${N}"
+}
 ok()    { log "  ${G}[ ok ]${N} $*"; }
 info()  { log "  ${C}[info]${N} $*"; }
-warn()  { log "  ${Y}[ ?? ]${N} $*"; printf '%s\n' "$*" >> "$WARN_FILE"; }
-alert() { log "  ${R}[FLAG]${N} $*"; printf '%s\n' "$*" >> "$FLAGS_FILE"; }
+
+# record <severity> <message> — remember a finding for the summary/JSON/HTML.
+record() {
+  local sev="$1"; shift
+  local msg="$*"
+  msg="${msg//$'\t'/ }"        # keep the TAB delimiter clean
+  printf '%s\t%s\t%s\n' "$sev" "$CURRENT_MODULE" "$msg" >> "$FIND_FILE"
+}
+# Finding severities, worst → mildest:
+crit()  { log "  ${R}${BOLD}[CRIT]${N} $*"; record crit "$*"; }   # weakened defenses / active-compromise signal
+alert() { log "  ${R}[FLAG]${N} $*";       record high "$*"; }   # look at this — anomalous but not proof
+warn()  { log "  ${Y}[ ?? ]${N} $*";       record med  "$*"; }   # lower-priority note to confirm
 
 IS_ROOT=0; [ "$(id -u)" -eq 0 ] && IS_ROOT=1
 
@@ -102,6 +134,30 @@ plist_program() {
   echo "$prog"
 }
 
+# notarized <path>: best-effort Gatekeeper assessment of a binary/bundle.
+# Notarization means Apple scanned it for malware. A Developer-ID target that
+# is NOT notarized is more worth a look. Echoes: "yes" | "no" | "?"
+notarized() {
+  local out
+  out="$(spctl --assess --type execute -v "$1" 2>&1)"
+  if echo "$out" | grep -qi "accepted"; then echo "yes"
+  elif echo "$out" | grep -qi "rejected\|denied\|unnotarized"; then echo "no"
+  else echo "?"; fi
+}
+
+# run_capped <seconds> <outfile> <command...>: run a command, redirecting its
+# stdout to <outfile>, but hard-stop it after <seconds> (macOS has no
+# `timeout`). Used to keep the optional unified-log scan bounded.
+run_capped() {
+  local secs="$1" out="$2"; shift 2
+  "$@" > "$out" 2>/dev/null &
+  local cpid=$!
+  ( sleep "$secs"; kill -TERM "$cpid" 2>/dev/null; sleep 2; kill -KILL "$cpid" 2>/dev/null ) &
+  local wpid=$!
+  wait "$cpid" 2>/dev/null
+  kill "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+}
+
 # =====================================================================
 clear 2>/dev/null
 log "${BOLD}${C}"
@@ -122,7 +178,7 @@ section "1. SYSTEM SECURITY POSTURE"
 # These are the baseline defenses. If any are OFF, that's the first thing to fix.
 
 sip="$(csrutil status 2>/dev/null)"
-echo "$sip" | grep -qi "enabled" && ok "System Integrity Protection (SIP): enabled" || alert "SIP is DISABLED — a major red flag if you didn't do it: $sip"
+echo "$sip" | grep -qi "enabled" && ok "System Integrity Protection (SIP): enabled" || crit "SIP is DISABLED — a major red flag if you didn't do it: $sip"
 
 fv="$(fdesetup status 2>/dev/null)"
 echo "$fv" | grep -qi "On" && ok "FileVault disk encryption: On" || warn "FileVault is Off — disk not encrypted: $fv"
@@ -131,7 +187,7 @@ fw="$(/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate 2>/dev/nu
 echo "$fw" | grep -qi "enabled" && ok "Application Firewall: enabled" || warn "Application Firewall is OFF: $fw"
 
 gk="$(spctl --status 2>/dev/null)"
-echo "$gk" | grep -qi "enabled" && ok "Gatekeeper: enabled" || alert "Gatekeeper is DISABLED — unsigned apps run freely: $gk"
+echo "$gk" | grep -qi "enabled" && ok "Gatekeeper: enabled" || crit "Gatekeeper is DISABLED — unsigned apps run freely: $gk"
 
 # Stealth mode / remote login / screen sharing
 ssh_on="$(systemsetup -getremotelogin 2>/dev/null)"
@@ -172,7 +228,13 @@ for dir in "${LAUNCH_DIRS[@]}"; do
     sig="$(check_sig "$prog")"
     case "$sig" in
       apple)        ok "$label → $prog [Apple-signed]" ;;
-      devid:*)      info "$label → $prog [Developer ID ${sig#devid:}] — confirm vendor is known" ;;
+      devid:*)
+        # A real vendor — but check Apple actually notarized it (scanned for malware)
+        if [ "$(notarized "$prog")" = "no" ]; then
+          warn "$label → $prog [Developer ID ${sig#devid:}, NOT notarized] — verify this vendor"
+        else
+          info "$label → $prog [Developer ID ${sig#devid:}] — confirm vendor is known"
+        fi ;;
       adhoc)        alert "$label → $prog [AD-HOC signed — common in malware]" ;;
       unsigned)     alert "$label → $prog [UNSIGNED]" ;;
       invalid)      alert "$label → $prog [signature INVALID/broken]" ;;
@@ -215,9 +277,13 @@ done
 
 # Legacy LoginHook / LogoutHook (almost always malicious on modern macOS)
 lh="$(defaults read /var/root/Library/Preferences/com.apple.loginwindow LoginHook 2>/dev/null)"
-[ -n "$lh" ] && alert "LoginHook set (legacy, rarely legitimate): $lh"
-glh="$(sudo defaults read com.apple.loginwindow LoginHook 2>/dev/null)"
-[ -n "$glh" ] && alert "Global LoginHook set: $glh"
+[ -n "$lh" ] && crit "LoginHook set (legacy, rarely legitimate): $lh"
+# Read the global hook directly when root (no mid-scan sudo prompt — this tool
+# never elevates on its own; run the whole thing under sudo for deep coverage).
+if [ $IS_ROOT -eq 1 ]; then
+  glh="$(defaults read /Library/Preferences/com.apple.loginwindow LoginHook 2>/dev/null)"
+  [ -n "$glh" ] && crit "Global LoginHook set: $glh"
+fi
 
 # emond (event monitor) — deprecated, abused for persistence
 if [ -d /etc/emond.d/rules ] && ls -A /etc/emond.d/rules 2>/dev/null | grep -qv SampleRules; then
@@ -369,7 +435,7 @@ IOCS=(
 )
 hit=0
 for ioc in "${IOCS[@]}"; do
-  [ -e "$ioc" ] && { alert "Known-bad path present: $ioc"; hit=1; }
+  [ -e "$ioc" ] && { crit "Known-bad path present: $ioc"; hit=1; }
 done
 # Apple-masquerade heuristic: anything named like Apple but NOT Apple-signed
 find "$HOME/Library/LaunchAgents" /Library/LaunchAgents /Library/LaunchDaemons -name '*apple*' 2>/dev/null | while read -r f; do
@@ -462,7 +528,7 @@ for u in $(dscl . -list /Users 2>/dev/null); do
   shell="$(dscl . -read /Users/"$u" UserShell 2>/dev/null | awk '{print $2}')"
   uid="$(dscl . -read /Users/"$u" UniqueID 2>/dev/null | awk '{print $2}')"
   if [ "$hidden" = "1" ] && [ "$uid" -ge 500 ] 2>/dev/null && [ "$shell" != "/usr/bin/false" ] && [ "$shell" != "/sbin/nologin" ]; then
-    alert "Hidden user '$u' (uid $uid) has a real login shell ($shell)"
+    crit "Hidden user '$u' (uid $uid) has a real login shell ($shell)"
   fi
 done
 
@@ -472,7 +538,7 @@ if [ $IS_ROOT -eq 1 ]; then
     [ -e "$sf" ] || continue
     case "$(basename "$sf")" in README) continue ;; esac
     if grep -qE 'NOPASSWD|ALL *= *\(ALL' "$sf" 2>/dev/null; then
-      alert "Permissive sudoers rule in $sf:"; grep -vE '^\s*#|^\s*$' "$sf" 2>/dev/null | sed 's/^/        /' | tee -a "$REPORT"
+      crit "Permissive sudoers rule in $sf:"; grep -vE '^\s*#|^\s*$' "$sf" 2>/dev/null | sed 's/^/        /' | tee -a "$REPORT"
     else
       info "    $sf"
     fi
@@ -511,50 +577,235 @@ dupmac="$(arp -an 2>/dev/null | grep -oE '([0-9a-f]{1,2}:){5}[0-9a-f]{1,2}' | so
 [ -n "$dupmac" ] && warn "Same MAC appears for multiple IPs (possible ARP spoofing): $dupmac"
 
 # =====================================================================
+section "21. XPROTECT & SECURITY-UPDATE FRESHNESS"
+# XProtect is Apple's built-in malware-signature engine. Malware sometimes
+# tries to freeze it by disabling automatic security-data updates so new
+# signatures never arrive. These should be current and enabled.
+xp_plist="/Library/Apple/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist"
+[ -f "$xp_plist" ] || xp_plist="/System/Library/CoreServices/XProtect.bundle/Contents/Info.plist"
+if [ -f "$xp_plist" ]; then
+  xpv="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$xp_plist" 2>/dev/null)"
+  [ -n "$xpv" ] && info "XProtect signature bundle version: $xpv"
+fi
+xpr_plist="/Library/Apple/System/Library/CoreServices/XProtect.app/Contents/Info.plist"
+[ -f "$xpr_plist" ] && info "XProtect Remediator version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$xpr_plist" 2>/dev/null)"
+
+auto_cfg="$(defaults read /Library/Preferences/com.apple.SoftwareUpdate ConfigDataInstall 2>/dev/null)"
+auto_crit="$(defaults read /Library/Preferences/com.apple.SoftwareUpdate CriticalUpdateInstall 2>/dev/null)"
+if [ "$auto_cfg" = "0" ] || [ "$auto_crit" = "0" ]; then
+  alert "Automatic security-data / critical updates are DISABLED (ConfigDataInstall=${auto_cfg:-?} CriticalUpdateInstall=${auto_crit:-?}) — malware often turns these off so XProtect can't catch it"
+else
+  ok "Automatic security-data updates appear enabled"
+fi
+
+# =====================================================================
+section "22. DYLD INJECTION & ENVIRONMENT PERSISTENCE"
+# Two stealthy tricks: forcing a library into other processes via
+# DYLD_INSERT_LIBRARIES, and the legacy ~/.MacOSX/environment.plist which
+# sets environment variables for every app you launch.
+envp="$HOME/.MacOSX/environment.plist"
+if [ -f "$envp" ]; then
+  alert "Legacy environment.plist present (classic injection vector): $envp"
+  /usr/libexec/PlistBuddy -c 'Print' "$envp" 2>/dev/null | sed 's/^/      /' | tee -a "$REPORT"
+else
+  ok "No ~/.MacOSX/environment.plist"
+fi
+dyld_hit=0
+for dir in "${LAUNCH_DIRS[@]}"; do
+  [ -d "$dir" ] || continue
+  for plist in "$dir"/*.plist; do
+    [ -e "$plist" ] || continue
+    envblock="$(/usr/libexec/PlistBuddy -c 'Print :EnvironmentVariables' "$plist" 2>/dev/null)"
+    if echo "$envblock" | grep -qi 'DYLD_'; then
+      alert "launchd item injects DYLD_* into its target (library hijack): $(basename "$plist")"
+      echo "$envblock" | grep -i 'DYLD_' | sed 's/^/        /' | tee -a "$REPORT"
+      dyld_hit=1
+    fi
+  done
+done
+[ $dyld_hit -eq 0 ] && ok "No launchd items inject DYLD_* variables"
+
+# =====================================================================
+section "23. TRUSTED ROOT CERTIFICATES (TLS interception / MITM)"
+# A root CA added to your keychain lets whoever holds its key silently
+# decrypt your HTTPS traffic. A managed Mac may have one legitimately; on a
+# personal machine, an unexpected user/admin-trusted root is a serious signal.
+trust="$(security dump-trust-settings 2>/dev/null; [ $IS_ROOT -eq 1 ] && security dump-trust-settings -d 2>/dev/null)"
+tcount="$(echo "$trust" | grep -icE 'Cert [0-9]+:')"
+if [ "${tcount:-0}" -gt 0 ] 2>/dev/null; then
+  alert "$tcount user/admin-added certificate trust setting(s) — confirm every one is expected:"
+  echo "$trust" | grep -iE 'Cert [0-9]+:|SecTrustSettingsResult|Number of' | sed 's/^/    /' | tee -a "$REPORT"
+else
+  ok "No user/admin-added certificate trust settings (only Apple's default roots)"
+fi
+
+# =====================================================================
+if [ "$WANT_DEEP" -eq 1 ]; then
+  section "24. UNIFIED-LOG TRIAGE — suspicious spawns, last 12h (--deep)"
+  # The unified log records process launches. We pull the last 12h and look
+  # for the hallmarks of a live infection: things run from /tmp, osascript
+  # driving a shell, or pipe-to-shell downloads. Time-capped so it can't hang.
+  info "Scanning the unified log (bounded to ~30s)..."
+  logtmp="$(mktemp "${TMPDIR:-/tmp}/machunt_log.XXXXXX")"
+  run_capped 30 "$logtmp" log show --style syslog --last 12h \
+    --predicate 'process == "osascript" OR eventMessage CONTAINS "/tmp/" OR eventMessage CONTAINS "curl " OR eventMessage CONTAINS "base64 -d"'
+  susp="$(grep -iE '/tmp/|/var/tmp/|/Users/Shared/|osascript.*(do shell|curl|http)|curl.*\|[[:space:]]*(sh|bash)|base64[[:space:]].*-d' "$logtmp" 2>/dev/null \
+          | grep -vE 'com\.apple|/System/|machunt|--predicate|--style syslog|eventMessage CONTAINS|log show' | head -40)"
+  if [ -n "$susp" ]; then
+    warn "Log lines worth a look (heuristic — may include benign developer activity):"
+    echo "$susp" | sed 's/^/    /' | tee -a "$REPORT"
+  else
+    ok "No obviously-suspicious spawn patterns in the last 12h"
+  fi
+  rm -f "$logtmp"
+fi
+
+# =====================================================================
 section "SUMMARY"
-# grep -c prints the count (and exits 1 when zero) — capture the number directly.
-FLAGS="$(grep -c . "$FLAGS_FILE" 2>/dev/null)"; FLAGS="${FLAGS:-0}"
-WARNS="$(grep -c . "$WARN_FILE" 2>/dev/null)"; WARNS="${WARNS:-0}"
+
+# ----- Tally findings by severity (from the single findings file) --------
+CRIT_N="$(awk -F'\t' '$1=="crit"{n++} END{print n+0}' "$FIND_FILE")"
+HIGH_N="$(awk -F'\t' '$1=="high"{n++} END{print n+0}' "$FIND_FILE")"
+MED_N="$(awk  -F'\t' '$1=="med"{n++}  END{print n+0}' "$FIND_FILE")"
+LOW_N="$(awk  -F'\t' '$1=="low"{n++}  END{print n+0}' "$FIND_FILE")"
+FLAGS=$(( CRIT_N + HIGH_N ))          # "flagged for review" = critical + high
+
+# ----- Security-posture score: 100 = nothing found, deduct per finding ---
+DEDUCT=$(( CRIT_N*30 + HIGH_N*12 + MED_N*4 + LOW_N*1 ))
+SCORE=$(( 100 - DEDUCT )); [ "$SCORE" -lt 0 ] && SCORE=0
+if   [ "$SCORE" -ge 90 ]; then GRADE="A"; GCOL="$G"
+elif [ "$SCORE" -ge 80 ]; then GRADE="B"; GCOL="$G"
+elif [ "$SCORE" -ge 70 ]; then GRADE="C"; GCOL="$Y"
+elif [ "$SCORE" -ge 60 ]; then GRADE="D"; GCOL="$Y"
+else                           GRADE="F"; GCOL="$R"
+fi
+
+log ""
+log "  ${BOLD}Security-posture score: ${GCOL}${SCORE}/100${N}${BOLD}  (grade ${GRADE})${N}"
+log "  ${R}${CRIT_N} critical${N}   ${R}${HIGH_N} high${N}   ${Y}${MED_N} notes${N}   ${C}${LOW_N} low${N}"
 log ""
 if [ "$FLAGS" -eq 0 ]; then
-  log "  ${G}${BOLD}No high-severity flags raised in this pass.${N} (${WARNS} lower-priority notes)"
-  log "  That's reassuring but not a clean bill of health — review sections"
-  log "  2, 7, 8 and 9 manually, and re-run with sudo for full coverage."
+  log "  ${G}${BOLD}No critical or high-severity findings in this pass.${N}"
+  log "  Reassuring, but not a clean bill of health — review sections 2, 7, 8 and 9"
+  log "  by hand, and re-run with sudo for full coverage."
 else
-  log "  ${R}${BOLD}${FLAGS} item(s) FLAGGED${N} for your review, plus ${WARNS} lower-priority note(s)."
-  log "  A flag means 'look at this', NOT 'definitely malware'. Many are benign"
-  log "  (legit Developer-ID apps, your own SSH, VPN tools). Investigate each:"
+  log "  A finding means 'look at this', NOT 'definitely malware'. Many are benign"
+  log "  (legit Developer-ID apps, your own SSH, a VPN). Work through each one:"
   log "    • Unknown LaunchAgent/Daemon  → look up the label & program path"
   log "    • Unsigned running process     → identify the app; quit & quarantine if unknown"
   log "    • Unexpected outbound conn.    → map the remote IP/host to an app you trust"
   log ""
-  log "  ${BOLD}Flagged items:${N}"
-  sed 's/^/    🚩 /' "$FLAGS_FILE" | tee -a "$REPORT"
-fi
-log ""
-if [ "$FLAGS" -eq 0 ]; then
-  log "  ${G}${BOLD}No automatic flags raised in this pass.${N}"
-  log "  That's reassuring but not a clean bill of health — review sections"
-  log "  2, 7, 8 and 9 manually, and re-run with sudo for full coverage."
-else
-  log "  ${Y}${BOLD}${FLAGS} item(s) were flagged for your review.${N}"
-  log "  A flag means 'look at this', NOT 'definitely malware'. Many are benign"
-  log "  (legit Developer-ID apps, your own SSH, VPN tools). Investigate each:"
-  log "    • Unknown LaunchAgent/Daemon  → look up the label & program path"
-  log "    • Unsigned running process     → identify the app; quit & quarantine if unknown"
-  log "    • Unexpected outbound conn.    → map the remote IP/host to an app you trust"
+  log "  ${BOLD}Items flagged for review (critical first):${N}"
+  awk -F'\t' '$1=="crit"' "$FIND_FILE" | while IFS="$(printf '\t')" read -r sev mod msg; do
+    log "    ${R}${BOLD}⛔ [$mod]${N} $msg"
+  done
+  awk -F'\t' '$1=="high"' "$FIND_FILE" | while IFS="$(printf '\t')" read -r sev mod msg; do
+    log "    ${R}🚩 [$mod]${N} $msg"
+  done
 fi
 log ""
 log "  Full report saved to: ${BOLD}$REPORT${N}"
 
-# Place a copy of the report on the Desktop (unless --no-desktop)
-if [ "$NO_DESKTOP" -eq 0 ]; then
-  DESKTOP_COPY="$HOME/Desktop/machunt_report_${TS}.txt"
-  if cp "$REPORT" "$DESKTOP_COPY" 2>/dev/null; then
-    log "  ${G}A copy was placed on your Desktop:${N} $DESKTOP_COPY"
-  else
-    log "  ${Y}(Could not copy to Desktop — report still saved at the path above)${N}"
-  fi
+# copy_to_desktop <file> <label> — mirror an artifact to the Desktop (unless --no-desktop)
+copy_to_desktop() {
+  [ "$NO_DESKTOP" -eq 0 ] || return 0
+  local dst="$HOME/Desktop/$(basename "$1")"
+  cp "$1" "$dst" 2>/dev/null && log "  ${G}$2 copied to your Desktop:${N} $dst"
+}
+copy_to_desktop "$REPORT" "Report"
+
+# ----- HTML report generator (--html) -----------------------------------
+htmlesc() { printf '%s' "$*" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
+write_html() {
+  local html="$1" gc host date_h priv
+  case "$GRADE" in A|B) gc="#22c55e";; C|D) gc="#eab308";; *) gc="#ef4444";; esac
+  host="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  date_h="$(date '+%Y-%m-%d %H:%M:%S %Z')"
+  priv="$( [ $IS_ROOT -eq 1 ] && echo 'root (deep scan)' || echo 'user' )"
+  {
+    cat <<'HTMLHEAD'
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>machunt report</title>
+<style>
+  :root{--bg:#0b0f17;--panel:#131a26;--panel2:#0f1521;--line:#1f2937;--txt:#e5e7eb;--mut:#94a3b8;
+        --crit:#ef4444;--high:#f97316;--med:#eab308;--low:#38bdf8;--ok:#22c55e;--accent:#8b5cf6;}
+  *{box-sizing:border-box}
+  body{margin:0;font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+       background:radial-gradient(1200px 600px at 20% -10%,#16223a 0,var(--bg) 55%) fixed;color:var(--txt)}
+  .wrap{max-width:960px;margin:0 auto;padding:32px 20px 64px}
+  header{display:flex;flex-wrap:wrap;gap:24px;align-items:center;justify-content:space-between;
+         border:1px solid var(--line);background:linear-gradient(180deg,var(--panel),var(--panel2));
+         border-radius:18px;padding:26px 28px;margin-bottom:24px}
+  .brand{font-weight:800;letter-spacing:.14em;font-size:12px;color:var(--accent)}
+  h1{margin:.25em 0 .15em;font-size:25px}
+  .meta{color:var(--mut);font-size:13px}
+  .gauge{width:132px;height:132px;border-radius:50%;flex:0 0 auto;display:grid;place-items:center;
+         background:conic-gradient(var(--gc) calc(var(--v)*1%),#1e293b 0)}
+  .gauge .inner{width:104px;height:104px;border-radius:50%;background:var(--panel2);display:grid;place-items:center;text-align:center}
+  .gauge .score{font-size:30px;font-weight:800;line-height:1}
+  .gauge .grade{font-size:11px;color:var(--mut);letter-spacing:.14em;margin-top:4px}
+  .chips{display:flex;flex-wrap:wrap;gap:10px;margin:0 0 24px}
+  .chip{border:1px solid var(--line);border-radius:999px;padding:7px 14px;font-size:13px;font-weight:600;
+        background:var(--panel);display:flex;gap:8px;align-items:center}
+  .dot{width:9px;height:9px;border-radius:50%}
+  .card{border:1px solid var(--line);background:var(--panel);border-radius:14px;margin:0 0 16px;overflow:hidden}
+  .card h2{margin:0;font-size:14px;padding:13px 18px;background:var(--panel2);border-bottom:1px solid var(--line)}
+  .card ul{list-style:none;margin:0;padding:4px 0}
+  .card li{padding:9px 18px 9px 42px;position:relative;border-bottom:1px solid rgba(255,255,255,.03);font-size:14px}
+  .card li:last-child{border-bottom:0}
+  .card li::before{content:"";position:absolute;left:20px;top:14px;width:9px;height:9px;border-radius:50%}
+  li.crit::before{background:var(--crit)} li.high::before{background:var(--high)}
+  li.med::before{background:var(--med)}  li.low::before{background:var(--low)}
+  .tag{font-size:10px;font-weight:800;letter-spacing:.05em;padding:2px 7px;border-radius:6px;color:#0b0f17;margin-right:6px}
+  .tag.crit{background:var(--crit)} .tag.high{background:var(--high)}
+  .tag.med{background:var(--med)}  .tag.low{background:var(--low)}
+  .clean{border:1px dashed var(--line);border-radius:14px;padding:34px;text-align:center;color:var(--ok);font-weight:700}
+  code{background:#0b1220;padding:1px 6px;border-radius:5px;color:#cbd5e1}
+  footer{color:var(--mut);font-size:12px;margin-top:28px;text-align:center;line-height:1.8}
+  a{color:var(--accent)}
+</style></head><body><div class="wrap">
+HTMLHEAD
+    printf '<header><div><div class="brand">MACHUNT · macOS THREAT HUNT</div>'
+    printf '<h1>Compromise assessment</h1>'
+    printf '<div class="meta">Host <b>%s</b> &middot; %s &middot; privilege: %s &middot; read-only</div></div>' \
+      "$(htmlesc "$host")" "$(htmlesc "$date_h")" "$priv"
+    printf '<div class="gauge" style="--gc:%s;--v:%s"><div class="inner"><div class="score" style="color:%s">%s</div><div class="grade">GRADE %s</div></div></div>' \
+      "$gc" "$SCORE" "$gc" "$SCORE" "$GRADE"
+    printf '</header>\n'
+    printf '<div class="chips">'
+    printf '<div class="chip"><span class="dot" style="background:var(--crit)"></span>%s critical</div>' "$CRIT_N"
+    printf '<div class="chip"><span class="dot" style="background:var(--high)"></span>%s high</div>' "$HIGH_N"
+    printf '<div class="chip"><span class="dot" style="background:var(--med)"></span>%s medium</div>' "$MED_N"
+    printf '<div class="chip"><span class="dot" style="background:var(--low)"></span>%s low</div></div>\n' "$LOW_N"
+    if [ ! -s "$FIND_FILE" ]; then
+      printf '<div class="clean">&#10003; No findings recorded in this pass. Re-run with <code>sudo</code> for full coverage.</div>\n'
+    else
+      awk -F'\t' '{print $2}' "$FIND_FILE" | awk '!seen[$0]++' | while IFS= read -r mod; do
+        printf '<div class="card"><h2>%s</h2><ul>' "$(htmlesc "$mod")"
+        for s in crit high med low; do
+          awk -F'\t' -v m="$mod" -v sv="$s" '$1==sv && $2==m{print $3}' "$FIND_FILE" | while IFS= read -r msg; do
+            [ -n "$msg" ] || continue
+            printf '<li class="%s"><span class="tag %s">%s</span>%s</li>' \
+              "$s" "$s" "$(printf '%s' "$s" | tr 'a-z' 'A-Z')" "$(htmlesc "$msg")"
+          done
+        done
+        printf '</ul></div>\n'
+      done
+    fi
+    printf '<footer>Generated by <b>machunt</b> &middot; read-only macOS threat hunting.<br>'
+    printf 'A finding means &ldquo;look at this&rdquo;, not &ldquo;this is malware&rdquo;. '
+    printf 'Second opinions: KnockKnock / LuLu / BlockBlock (<a href="https://objective-see.org">objective-see.org</a>).<br>'
+    printf 'Score = 100 &minus; (crit&times;30 + high&times;12 + med&times;4 + low&times;1), floored at 0.</footer>'
+    printf '</div></body></html>\n'
+  } > "$html"
+}
+if [ "$WANT_HTML" -eq 1 ]; then
+  HTML="${RUN_DIR}/machunt_report_${TS}.html"
+  write_html "$HTML"
+  log "  ${G}HTML report written to:${N} $HTML"
+  copy_to_desktop "$HTML" "HTML report"
 fi
 
 # Optional machine-readable JSON summary (--json)
@@ -567,16 +818,21 @@ if [ "$WANT_JSON" -eq 1 ]; then
     printf '  "scanned_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '  "privileged": %s,\n' "$( [ $IS_ROOT -eq 1 ] && echo true || echo false )"
     printf '  "report_file": "%s",\n' "$REPORT"
-    printf '  "flag_count": %s,\n' "$FLAGS"
-    printf '  "warn_count": %s,\n' "$WARNS"
-    printf '  "flags": [\n'
-    # JSON-escape each flagged line
-    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$FLAGS_FILE" 2>/dev/null \
-      | awk 'NF{lines[NR]=$0} END{for(i=1;i<=NR;i++){printf "    \"%s\"%s\n", lines[i], (i<NR?",":"")}}'
+    printf '  "score": %s,\n' "$SCORE"
+    printf '  "grade": "%s",\n' "$GRADE"
+    printf '  "counts": { "critical": %s, "high": %s, "medium": %s, "low": %s },\n' "$CRIT_N" "$HIGH_N" "$MED_N" "$LOW_N"
+    printf '  "findings": [\n'
+    awk -F'\t' '
+      function esc(s){ gsub(/\\/,"\\\\",s); gsub(/"/,"\\\"",s); return s }
+      NF>=3 { if (n++) printf ",\n";
+              printf "    {\"severity\":\"%s\",\"module\":\"%s\",\"message\":\"%s\"}", esc($1), esc($2), esc($3) }
+      END   { if (n) printf "\n" }
+    ' "$FIND_FILE"
     printf '  ]\n'
     printf '}\n'
   } > "$JSON"
   log "  ${G}JSON summary written to:${N} $JSON"
+  copy_to_desktop "$JSON" "JSON summary"
 fi
 log ""
 log "  ${C}Next-step recommendations:${N}"
