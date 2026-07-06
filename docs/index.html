@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>machunt — macOS Threat Hunting &amp; Compromise Assessment</title>
+<meta name="description" content="A read-only macOS scanner that hunts where malware actually hides — persistence, signatures, network, privacy grants — and never touches a thing.">
+<meta property="og:title" content="machunt — macOS Threat Hunting">
+<meta property="og:description" content="Read-only compromise assessment for macOS. Pure bash, no dependencies, nothing leaves your Mac.">
+<meta property="og:type" content="website">
+<style>
+  :root{
+    --bg:#0b0f17;--panel:#131a26;--panel2:#0f1521;--line:#1f2937;--line2:#273449;
+    --txt:#e5e7eb;--mut:#94a3b8;--dim:#64748b;
+    --crit:#ef4444;--high:#f97316;--med:#eab308;--low:#38bdf8;--ok:#22c55e;--accent:#8b5cf6;--accent2:#22d3ee;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;color:var(--txt);background:var(--bg);
+    font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background-image:
+      radial-gradient(900px 500px at 85% -8%,rgba(139,92,246,.16),transparent 60%),
+      radial-gradient(800px 500px at 5% 0%,rgba(34,211,238,.10),transparent 55%);
+    background-attachment:fixed;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent2);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .wrap{max-width:1040px;margin:0 auto;padding:0 22px}
+  code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+  /* nav */
+  nav{position:sticky;top:0;z-index:20;backdrop-filter:blur(10px);
+    background:rgba(11,15,23,.72);border-bottom:1px solid var(--line)}
+  nav .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+  .logo{display:flex;align-items:center;gap:10px;font-weight:800;letter-spacing:.02em}
+  .logo .mk{font-family:ui-monospace,monospace;color:var(--accent)}
+  .logo .sh{filter:drop-shadow(0 0 6px rgba(139,92,246,.6))}
+  .navlinks{display:flex;gap:22px;align-items:center;font-size:14px;color:var(--mut)}
+  .navlinks a{color:var(--mut)}
+  .navlinks a:hover{color:var(--txt);text-decoration:none}
+  .ghbtn{border:1px solid var(--line2);border-radius:9px;padding:7px 13px;color:var(--txt)!important;background:var(--panel)}
+  .ghbtn:hover{border-color:var(--accent);text-decoration:none}
+  @media(max-width:640px){.navlinks a.hideSm{display:none}}
+
+  /* hero */
+  .hero{padding:70px 0 40px;display:grid;grid-template-columns:1.05fr .95fr;gap:44px;align-items:center}
+  @media(max-width:860px){.hero{grid-template-columns:1fr;padding:48px 0 24px}}
+  .eyebrow{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;letter-spacing:.16em;
+    text-transform:uppercase;color:var(--accent);font-weight:700;
+    border:1px solid var(--line2);border-radius:999px;padding:6px 13px;background:var(--panel)}
+  h1{font-size:44px;line-height:1.08;margin:20px 0 14px;letter-spacing:-.02em}
+  @media(max-width:860px){h1{font-size:34px}}
+  h1 .g{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .lede{color:var(--mut);font-size:18px;max-width:36ch}
+  .cmd{margin-top:26px;display:flex;align-items:stretch;border:1px solid var(--line2);border-radius:11px;
+    background:var(--panel2);overflow:hidden;max-width:440px}
+  .cmd code{flex:1;padding:13px 15px;font-size:13.5px;color:#cbd5e1;overflow-x:auto;white-space:nowrap}
+  .cmd .dollar{color:var(--dim);user-select:none;margin-right:8px}
+  .cmd button{border:0;border-left:1px solid var(--line2);background:var(--panel);color:var(--mut);
+    padding:0 15px;cursor:pointer;font-size:12px;font-weight:700;letter-spacing:.04em}
+  .cmd button:hover{color:var(--txt);background:#182233}
+  .badges{display:flex;flex-wrap:wrap;gap:9px;margin-top:22px}
+  .badge{font-size:12px;font-weight:600;color:var(--mut);border:1px solid var(--line);
+    background:var(--panel);border-radius:8px;padding:5px 11px;display:inline-flex;gap:7px;align-items:center}
+  .badge b{color:var(--txt);font-weight:700}
+  .dotc{width:8px;height:8px;border-radius:50%}
+
+  /* terminal mockup */
+  .term{border:1px solid var(--line2);border-radius:14px;background:linear-gradient(180deg,#0d1420,#0a0e16);
+    box-shadow:0 30px 70px -30px rgba(0,0,0,.8);overflow:hidden}
+  .term .bar{display:flex;align-items:center;gap:7px;padding:11px 14px;border-bottom:1px solid var(--line);background:#0e1521}
+  .term .bar i{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .term .bar .t{margin-left:10px;color:var(--dim);font-size:12px;font-family:ui-monospace,monospace}
+  .term pre{margin:0;padding:16px 16px 18px;font-family:ui-monospace,monospace;font-size:12px;line-height:1.55;
+    color:#cbd5e1;overflow-x:auto}
+  .term .banner{color:var(--accent2);font-size:8.5px;line-height:1.12;letter-spacing:0}
+  .c-ok{color:var(--ok)} .c-info{color:var(--accent2)} .c-warn{color:var(--med)}
+  .c-flag{color:var(--high)} .c-crit{color:var(--crit);font-weight:700} .c-dim{color:var(--dim)}
+  .c-score{color:var(--ok);font-weight:700}
+
+  /* sections */
+  section{padding:56px 0;border-top:1px solid var(--line)}
+  .kicker{color:var(--accent);font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:12.5px}
+  h2{font-size:30px;margin:10px 0 10px;letter-spacing:-.01em}
+  .sub{color:var(--mut);max-width:60ch;margin:0}
+
+  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:30px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr 1fr}}
+  @media(max-width:560px){.grid{grid-template-columns:1fr}}
+  .feat{border:1px solid var(--line);background:var(--panel);border-radius:14px;padding:20px}
+  .feat:hover{border-color:var(--line2)}
+  .feat .ic{width:38px;height:38px;border-radius:10px;display:grid;place-items:center;font-size:19px;
+    background:rgba(139,92,246,.12);border:1px solid rgba(139,92,246,.28);margin-bottom:13px}
+  .feat h3{margin:0 0 6px;font-size:16px}
+  .feat p{margin:0;color:var(--mut);font-size:14px}
+
+  /* modules list */
+  .mods{margin-top:26px;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--panel)}
+  .mods summary{cursor:pointer;padding:16px 20px;font-weight:700;list-style:none;display:flex;justify-content:space-between;align-items:center}
+  .mods summary::-webkit-details-marker{display:none}
+  .mods summary .chev{color:var(--mut);transition:transform .2s}
+  .mods[open] summary .chev{transform:rotate(90deg)}
+  .modgrid{display:grid;grid-template-columns:1fr 1fr;gap:0;border-top:1px solid var(--line)}
+  @media(max-width:640px){.modgrid{grid-template-columns:1fr}}
+  .modgrid div{padding:11px 20px;font-size:13.5px;color:var(--mut);border-bottom:1px solid rgba(255,255,255,.03)}
+  .modgrid div b{color:var(--txt);font-weight:600}
+  .modgrid .n{color:var(--accent);font-weight:700;margin-right:8px;font-family:ui-monospace,monospace}
+
+  /* signature chips */
+  .sigrow{display:flex;flex-wrap:wrap;gap:12px;margin-top:26px}
+  .sig{flex:1;min-width:210px;border:1px solid var(--line);border-radius:12px;padding:16px 18px;background:var(--panel)}
+  .sig .lab{font-family:ui-monospace,monospace;font-weight:700;font-size:14px;display:flex;align-items:center;gap:8px}
+  .sig p{margin:8px 0 0;color:var(--mut);font-size:13.5px}
+
+  /* score */
+  .scorewrap{display:grid;grid-template-columns:200px 1fr;gap:34px;align-items:center;margin-top:28px}
+  @media(max-width:640px){.scorewrap{grid-template-columns:1fr;justify-items:center;text-align:center}}
+  .gauge{width:190px;height:190px;border-radius:50%;display:grid;place-items:center;
+    background:conic-gradient(var(--ok) calc(var(--v,84)*1%),#1e293b 0)}
+  .gauge .inner{width:150px;height:150px;border-radius:50%;background:var(--panel2);display:grid;place-items:center;text-align:center}
+  .gauge .n{font-size:46px;font-weight:800;color:var(--ok);line-height:1}
+  .gauge .gr{color:var(--mut);font-size:12px;letter-spacing:.16em;margin-top:6px}
+  .formula{font-family:ui-monospace,monospace;background:var(--panel2);border:1px solid var(--line);
+    border-radius:10px;padding:12px 15px;color:#cbd5e1;font-size:13px;display:inline-block;margin-top:6px}
+  .sevlist{margin:18px 0 0;padding:0;list-style:none;display:grid;gap:9px}
+  .sevlist li{display:flex;gap:11px;align-items:flex-start;font-size:14px;color:var(--mut)}
+  .pill{font-size:11px;font-weight:800;letter-spacing:.04em;padding:3px 9px;border-radius:7px;color:#0b0f17;flex:0 0 auto}
+  .pill.crit{background:var(--crit)} .pill.high{background:var(--high)} .pill.med{background:var(--med)}
+
+  /* safety */
+  .safe{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:26px}
+  @media(max-width:640px){.safe{grid-template-columns:1fr}}
+  .safe div{border:1px solid var(--line);border-radius:12px;padding:17px 19px;background:var(--panel);font-size:14px;color:var(--mut)}
+  .safe div b{color:var(--txt)}
+
+  /* install */
+  .steps{counter-reset:s;margin-top:24px;display:grid;gap:12px}
+  .step{display:flex;gap:14px;align-items:flex-start;border:1px solid var(--line);border-radius:12px;
+    padding:14px 18px;background:var(--panel)}
+  .step::before{counter-increment:s;content:counter(s);flex:0 0 auto;width:26px;height:26px;border-radius:50%;
+    display:grid;place-items:center;font-weight:800;font-size:13px;background:rgba(139,92,246,.15);
+    border:1px solid rgba(139,92,246,.4);color:#c4b5fd}
+  .step code{font-size:13.5px;color:#cbd5e1}
+  .step .d{color:var(--mut);font-size:13px;margin-top:2px}
+
+  footer{border-top:1px solid var(--line);padding:34px 0 60px;color:var(--dim);font-size:13.5px}
+  footer .wrap{display:flex;flex-wrap:wrap;justify-content:space-between;gap:14px;align-items:center}
+  footer a{color:var(--mut)}
+  .disc{max-width:70ch;margin-top:14px;color:var(--dim);font-size:12.5px;line-height:1.7}
+</style>
+</head>
+<body>
+
+<nav><div class="wrap">
+  <div class="logo"><span class="sh">🛡️</span><span class="mk">machunt</span></div>
+  <div class="navlinks">
+    <a href="#features" class="hideSm">Features</a>
+    <a href="#modules" class="hideSm">Modules</a>
+    <a href="#score" class="hideSm">Score</a>
+    <a href="#install">Install</a>
+    <a class="ghbtn" href="https://github.com/mobinert/machunt">GitHub ↗</a>
+  </div>
+</div></nav>
+
+<header class="wrap hero">
+  <div>
+    <span class="eyebrow">🛡️ Read-only · macOS 12–15</span>
+    <h1>Hunt where macOS malware <span class="g">actually hides.</span></h1>
+    <p class="lede">A pure-bash compromise-assessment scanner that inspects persistence, code signatures, network and privacy grants — and <b>never deletes, quarantines, or changes a thing.</b></p>
+
+    <div class="cmd">
+      <code><span class="dollar">$</span><span id="cloneCmd">git clone https://github.com/mobinert/machunt.git</span></code>
+      <button id="copyBtn" onclick="copyClone()">Copy</button>
+    </div>
+
+    <div class="badges">
+      <span class="badge">MIT <b>License</b></span>
+      <span class="badge">Pure <b>Bash</b> · no deps</span>
+      <span class="badge"><b>24</b> hunt modules</span>
+      <span class="badge"><span class="dotc" style="background:var(--ok)"></span>100% <b>read-only</b></span>
+    </div>
+  </div>
+
+  <div class="term" aria-hidden="true">
+    <div class="bar"><i style="background:#ff5f57"></i><i style="background:#febc2e"></i><i style="background:#28c840"></i><span class="t">machunt.sh — zsh</span></div>
+<pre><span class="c-dim">$ ./machunt.sh</span>
+<span class="banner">   ███╗   ███╗ █████╗  ██████╗██╗  ██╗██╗   ██╗███╗   ██╗████████╗
+   ████╗ ████║██╔══██╗██╔════╝██║  ██║██║   ██║████╗  ██║╚══██╔══╝
+   ██╔████╔██║███████║██║     ███████║██║   ██║██╔██╗ ██║   ██║
+   ██║╚██╔╝██║██╔══██║██║     ██╔══██║██║   ██║██║╚██╗██║   ██║
+   ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝██║ ╚████║   ██║
+   ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝</span>
+<span class="c-dim">   macOS Threat Hunt &amp; Compromise Assessment — READ-ONLY</span>
+
+<span class="c-dim">  ══ 1. SYSTEM SECURITY POSTURE ══</span>
+  <span class="c-ok">[ ok ]</span> System Integrity Protection (SIP): enabled
+  <span class="c-warn">[ ?? ]</span> Application Firewall is OFF
+<span class="c-dim">  ══ 2. PERSISTENCE — LaunchAgents &amp; Daemons ══</span>
+  <span class="c-ok">[ ok ]</span> com.apple.softwareupdate → [Apple-signed]
+  <span class="c-flag">[FLAG]</span> com.x.helper → /tmp/agent [UNSIGNED]
+  <span class="c-crit">[CRIT]</span> SIP is DISABLED — major red flag
+<span class="c-dim">  ══ SUMMARY ══</span>
+  <span class="c-score">Security-posture score: 84/100  (grade B)</span>
+  <span class="c-crit">0 critical</span>  <span class="c-flag">1 high</span>  <span class="c-warn">1 note</span></pre>
+  </div>
+</header>
+
+<section id="why">
+  <div class="wrap">
+    <div class="kicker">Why machunt</div>
+    <h2>Antivirus looks for known files. machunt looks for the techniques.</h2>
+    <p class="sub">The launch agents, signature anomalies, rogue DNS, injected libraries and privacy grants that real macOS implants rely on. It assumes nothing, verifies the code signature of every persistence target, and tells you <b>exactly what to look at</b> — a <span class="mono" style="color:var(--high)">[FLAG]</span> means <i>“look at this,”</i> not <i>“this is malware.”</i> You stay in control of every decision.</p>
+  </div>
+</section>
+
+<section id="features">
+  <div class="wrap">
+    <div class="kicker">Capabilities</div>
+    <h2>Built to catch how Macs really get compromised</h2>
+    <div class="grid">
+      <div class="feat"><div class="ic">🔐</div><h3>Signature verification</h3><p>Every auto-run binary is classified Apple-signed, Developer&nbsp;ID, ad-hoc, unsigned or invalid — plus a notarization check on real vendors.</p></div>
+      <div class="feat"><div class="ic">📌</div><h3>Persistence hunting</h3><p>LaunchAgents/Daemons, login items, cron, at, login hooks, emond and configuration profiles — every place implants live.</p></div>
+      <div class="feat"><div class="ic">🌐</div><h3>Network &amp; DNS</h3><p>Listening ports, established outbound connections, rogue DNS, hosts/proxy tampering, and ARP-spoof / MITM detection.</p></div>
+      <div class="feat"><div class="ic">👁️</div><h3>Privacy &amp; spyware tells</h3><p>Which apps hold camera, mic, screen-recording or full-disk access — the number-one signal of stalkerware.</p></div>
+      <div class="feat"><div class="ic">🧬</div><h3>Injection &amp; MITM</h3><p>DYLD library injection, legacy environment.plist, and unexpected trusted root CAs that silently decrypt your HTTPS.</p></div>
+      <div class="feat"><div class="ic">📈</div><h3>Baseline &amp; scoring</h3><p>Fingerprints persistence and alerts on anything new between runs, then grades your posture 0–100.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="modules">
+  <div class="wrap">
+    <div class="kicker">Coverage</div>
+    <h2>All 24 hunt modules</h2>
+    <p class="sub">Run as your user, or with <code>sudo</code> for deep coverage of system daemons, TCC, sudoers and every port.</p>
+    <details class="mods" open>
+      <summary><span>The full checklist</span><span class="chev">▸</span></summary>
+      <div class="modgrid">
+        <div><span class="n">01</span><b>Security posture</b> — SIP, FileVault, Firewall, Gatekeeper</div>
+        <div><span class="n">02</span><b>LaunchAgents / Daemons</b> — signature-verified persistence</div>
+        <div><span class="n">03</span><b>Login items</b> — background tasks &amp; helpers</div>
+        <div><span class="n">04</span><b>Cron · at · hooks · emond</b> — scheduled backdoors</div>
+        <div><span class="n">05</span><b>Configuration profiles</b> — forced proxies / certs</div>
+        <div><span class="n">06</span><b>Kernel &amp; system extensions</b> — non-Apple kexts</div>
+        <div><span class="n">07</span><b>Running processes</b> — unsigned / temp-dir binaries</div>
+        <div><span class="n">08</span><b>Network ports</b> — listening &amp; established</div>
+        <div><span class="n">09</span><b>DNS · hosts · proxy</b> — traffic hijacking</div>
+        <div><span class="n">10</span><b>Browser extensions</b> — Safari &amp; Chromium</div>
+        <div><span class="n">11</span><b>SUID / SGID binaries</b> — priv-esc backdoors</div>
+        <div><span class="n">12</span><b>Recently modified files</b> — persistence dirs</div>
+        <div><span class="n">13</span><b>Shell &amp; environment</b> — reverse-shell rc lines</div>
+        <div><span class="n">14</span><b>Known-malware IOCs</b> — documented bad paths</div>
+        <div><span class="n">15</span><b>Privacy permissions (TCC)</b> — camera / mic / screen</div>
+        <div><span class="n">16</span><b>Quarantine / downloads</b> — where files came from</div>
+        <div><span class="n">17</span><b>Baseline diff</b> — alerts on anything new</div>
+        <div><span class="n">18</span><b>Local accounts &amp; sudo</b> — hidden admins</div>
+        <div><span class="n">19</span><b>SSH trust</b> — planted authorized_keys</div>
+        <div><span class="n">20</span><b>Network neighborhood</b> — gateway / ARP / MITM</div>
+        <div><span class="n">21</span><b>XProtect &amp; update freshness</b> — signatures current?</div>
+        <div><span class="n">22</span><b>DYLD injection</b> — library-hijack persistence</div>
+        <div><span class="n">23</span><b>Trusted root certs</b> — HTTPS interception</div>
+        <div><span class="n">24</span><b>Unified-log triage</b> — recent suspicious spawns <span style="color:var(--accent)">--deep</span></div>
+      </div>
+    </details>
+  </div>
+</section>
+
+<section id="signatures">
+  <div class="wrap">
+    <div class="kicker">The core idea</div>
+    <h2>The signature model</h2>
+    <p class="sub">For every binary that auto-runs, machunt reads the code signature and tells you what it means.</p>
+    <div class="sigrow">
+      <div class="sig"><div class="lab" style="color:var(--ok)">🟢 Apple-signed</div><p>Shipped by Apple — expected.</p></div>
+      <div class="sig"><div class="lab" style="color:var(--low)">🔵 Developer ID</div><p>A real vendor — confirm it’s one you installed.</p></div>
+      <div class="sig"><div class="lab" style="color:var(--med)">🟡 Not notarized</div><p>Signed, but Apple never malware-scanned it.</p></div>
+      <div class="sig"><div class="lab" style="color:var(--crit)">🔴 ad-hoc / unsigned</div><p>Common in malware — investigate.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="score">
+  <div class="wrap">
+    <div class="kicker">At a glance</div>
+    <h2>A 0–100 security-posture score</h2>
+    <div class="scorewrap">
+      <div class="gauge" style="--v:84"><div class="inner"><div class="n">84</div><div class="gr">GRADE B</div></div></div>
+      <div>
+        <p class="sub">Every run ends with a score and a letter grade, so you can track a machine over time at a glance. It starts at 100 and deducts per finding by severity.</p>
+        <div class="formula">score = 100 − (crit×30 + high×12 + med×4 + low×1)</div>
+        <ul class="sevlist">
+          <li><span class="pill crit">CRIT</span> SIP/Gatekeeper off, hidden admin user, passwordless-sudo, LoginHook, known-bad IOC</li>
+          <li><span class="pill high">HIGH</span> Unsigned auto-run binary, DYLD-injecting launch item, unexpected trusted root CA</li>
+          <li><span class="pill med">MED</span> Firewall off, un-notarized Developer-ID target, SSH enabled</li>
+        </ul>
+        <p class="sub" style="margin-top:16px">The same breakdown is written to the <code>--html</code> and <code>--json</code> outputs. A high score is reassuring — <b>not a clean bill of health.</b></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="safety">
+  <div class="wrap">
+    <div class="kicker">Safety first</div>
+    <h2>It never touches a thing</h2>
+    <div class="safe">
+      <div><b>Read-only by design.</b> No <code>rm</code>, no <code>kill</code>, no quarantine, no config changes — ever. Every finding is yours to review and act on.</div>
+      <div><b>No dependencies.</b> Pure bash and tools already on macOS. Nothing is installed on your machine.</div>
+      <div><b>Nothing leaves your Mac.</b> No network calls, no telemetry. The report is yours alone.</div>
+      <div><b>Your data stays out of git.</b> <code>.gitignore</code> keeps scan reports and your baseline uncommitted by default.</div>
+    </div>
+  </div>
+</section>
+
+<section id="install">
+  <div class="wrap">
+    <div class="kicker">Get started</div>
+    <h2>Up and running in 30 seconds</h2>
+    <div class="steps">
+      <div class="step"><div><code>git clone https://github.com/mobinert/machunt.git &amp;&amp; cd machunt</code><div class="d">Clone the repo and step in.</div></div></div>
+      <div class="step"><div><code>chmod +x machunt.sh</code><div class="d">Make the scanner executable.</div></div></div>
+      <div class="step"><div><code>./machunt.sh --html</code><div class="d">User-level scan + a designed HTML report you can open in any browser.</div></div></div>
+      <div class="step"><div><code>sudo ./machunt.sh --deep</code><div class="d">Full coverage — system daemons, TCC, all ports, and unified-log triage.</div></div></div>
+    </div>
+    <p class="sub" style="margin-top:22px">Reports save to the directory you run from (and a copy on your Desktop). Add <code>--json</code> for a machine-readable summary. Run <code>./machunt.sh --help</code> for every option.</p>
+  </div>
+</section>
+
+<footer><div class="wrap">
+  <div>Built for defenders by <a href="https://github.com/mobinert"><b>Mobin Erteghaie</b></a> · <a href="https://github.com/mobinert/machunt/blob/main/LICENSE">MIT License</a></div>
+  <div><a href="https://github.com/mobinert/machunt">Source on GitHub ↗</a></div>
+</div>
+<div class="wrap disc">Use only on systems you own or are authorized to assess. machunt reports indicators for human review; a flag is a prompt to investigate, not proof of compromise. For a second opinion, pair it with the free Objective-See tools (KnockKnock, LuLu, BlockBlock).</div>
+</footer>
+
+<script>
+  function copyClone(){
+    var txt="git clone https://github.com/mobinert/machunt.git";
+    var btn=document.getElementById('copyBtn');
+    var done=function(){btn.textContent="Copied ✓";setTimeout(function(){btn.textContent="Copy";},1600);};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(txt).then(done,done);}
+    else{done();}
+  }
+  // Animate the score gauge on first view.
+  (function(){
+    var g=document.querySelector('#score .gauge');
+    if(!g||!('IntersectionObserver'in window))return;
+    g.style.setProperty('--v','0');
+    g.style.transition='none';
+    var io=new IntersectionObserver(function(es){
+      es.forEach(function(e){
+        if(e.isIntersecting){
+          var t=84,c=0;
+          var iv=setInterval(function(){c+=2;if(c>=t){c=t;clearInterval(iv);}g.style.setProperty('--v',c);},14);
+          io.disconnect();
+        }
+      });
+    },{threshold:.4});
+    io.observe(g);
+  })();
+</script>
+</body>
+</html>
