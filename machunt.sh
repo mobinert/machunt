@@ -25,6 +25,8 @@
 # files) and we want to keep scanning and report what we can.
 set -o pipefail 2>/dev/null
 
+MACHUNT_VERSION="2.0.0"
+
 # ----- Command-line options ------------------------------------------
 WANT_JSON=0
 WANT_HTML=0
@@ -36,10 +38,11 @@ for arg in "$@"; do
     --html)        WANT_HTML=1 ;;
     --deep)        WANT_DEEP=1 ;;
     --no-desktop)  NO_DESKTOP=1 ;;
+    -v|--version)
+      printf 'machunt v%s\n' "$MACHUNT_VERSION"; exit 0 ;;
     -h|--help)
+      printf 'machunt v%s — macOS Threat Hunt & Compromise Assessment (read-only)\n\n' "$MACHUNT_VERSION"
       cat <<'EOF'
-machunt — macOS Threat Hunt & Compromise Assessment (read-only)
-
 Usage:
   ./machunt.sh [options]
   sudo ./machunt.sh [options]      # deeper coverage (system daemons, TCC, ports)
@@ -168,7 +171,7 @@ log "   ██║╚██╔╝██║██╔══██║██║     �
 log "   ██║ ╚═╝ ██║██║  ██║╚██████╗██║  ██║╚██████╔╝██║ ╚████║   ██║"
 log "   ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝"
 log "${N}"
-log "   macOS Threat Hunt & Compromise Assessment — READ-ONLY"
+log "   macOS Threat Hunt & Compromise Assessment  v${MACHUNT_VERSION} — READ-ONLY"
 log "   Host: $(scutil --get ComputerName 2>/dev/null || hostname)   User: $(whoami)   Date: $(date)"
 log "   Privilege: $( [ $IS_ROOT -eq 1 ] && echo 'ROOT (deep scan)' || echo 'user (run with sudo for full coverage)')"
 log "   Report file: $REPORT"

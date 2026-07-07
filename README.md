@@ -13,6 +13,7 @@
 
 **A read-only scanner that hunts where macOS malware actually hides — and never touches a thing.**
 
+[![Release](https://img.shields.io/github/v/release/mobinert/machunt?style=flat-square&color=ff4444)](https://github.com/mobinert/machunt/releases/latest)
 [![Website](https://img.shields.io/badge/Website-mobinert.github.io%2Fmachunt-8b5cf6.svg?style=flat-square)](https://mobinert.github.io/machunt/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-22c55e.svg?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/macOS-12%E2%80%9315-000000.svg?style=flat-square&logo=apple)](#)
