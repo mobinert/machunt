@@ -152,6 +152,15 @@ shasum -a 256 /path/to/suspicious/binary    # then look the hash up on VirusTota
 
 ---
 
+## 🔗 More tools by the author
+
+| Tool | Platform | What it does |
+|------|----------|--------------|
+| [**HORUS**](https://github.com/mobinert/HORUS) | Windows | IOC enrichment + PE static analysis in one zero-dependency exe |
+| [**ssh-fortress**](https://github.com/mobinert/ssh-fortress) | Linux | SSH hardening, brute-force protection & SIEM integration |
+
+---
+
 ## 📄 License
 
 [MIT](LICENSE) © 2026 **Mobin Erteghaie**
