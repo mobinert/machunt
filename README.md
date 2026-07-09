@@ -21,6 +21,10 @@
 [![Read Only](https://img.shields.io/badge/Mode-100%25_read--only-0ea5e9.svg?style=flat-square)](#-safety-first)
 [![Maintainer](https://img.shields.io/badge/by-Mobin_Erteghaie-8b5cf6.svg?style=flat-square)](https://github.com/mobinert)
 
+<br/>
+
+<img src="assets/demo.gif" width="720" alt="machunt scanning a Mac read-only"/>
+
 </div>
 
 ---
