@@ -31,12 +31,14 @@ MACHUNT_VERSION="2.0.0"
 WANT_JSON=0
 WANT_HTML=0
 WANT_DEEP=0
+WANT_REDACT=0
 NO_DESKTOP=0
 for arg in "$@"; do
   case "$arg" in
     --json)        WANT_JSON=1 ;;
     --html)        WANT_HTML=1 ;;
     --deep)        WANT_DEEP=1 ;;
+    --redact)      WANT_REDACT=1 ;;
     --no-desktop)  NO_DESKTOP=1 ;;
     -v|--version)
       printf 'machunt v%s\n' "$MACHUNT_VERSION"; exit 0 ;;
@@ -53,6 +55,9 @@ Options:
   --json          Also write a machine-readable JSON summary of findings
   --deep          Enable slower deep checks (unified-log triage of the
                   last 12h for suspicious process spawns)
+  --redact        Mask machine identifiers (hostname, username) in all
+                  output so a report or screen recording can be shared
+                  publicly without revealing who or what you are
   --no-desktop    Do not place a copy of the report on the Desktop
   -h, --help      Show this help
 
@@ -64,6 +69,11 @@ EOF
     *) printf 'Unknown option: %s (try --help)\n' "$arg" >&2; exit 2 ;;
   esac
 done
+
+# Machine-identifier accessors — with --redact these return placeholders so a
+# report or demo recording can be published without leaking your name/host.
+_host_id() { if [ "$WANT_REDACT" -eq 1 ]; then printf '[redacted]'; else scutil --get ComputerName 2>/dev/null || hostname; fi; }
+_user_id() { if [ "$WANT_REDACT" -eq 1 ]; then printf '[redacted]'; else whoami; fi; }
 
 # ----- Output setup --------------------------------------------------
 TS="$(date +%Y%m%d_%H%M%S)"
@@ -172,7 +182,7 @@ log "   ██║ ╚═╝ ██║██║  ██║╚██████�
 log "   ╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝   ╚═╝"
 log "${N}"
 log "   macOS Threat Hunt & Compromise Assessment  v${MACHUNT_VERSION} — READ-ONLY"
-log "   Host: $(scutil --get ComputerName 2>/dev/null || hostname)   User: $(whoami)   Date: $(date)"
+log "   Host: $(_host_id)   User: $(_user_id)   Date: $(date)"
 log "   Privilege: $( [ $IS_ROOT -eq 1 ] && echo 'ROOT (deep scan)' || echo 'user (run with sudo for full coverage)')"
 log "   Report file: $REPORT"
 
@@ -722,7 +732,7 @@ htmlesc() { printf '%s' "$*" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g'; }
 write_html() {
   local html="$1" gc host date_h priv
   case "$GRADE" in A|B) gc="#22c55e";; C|D) gc="#eab308";; *) gc="#ef4444";; esac
-  host="$(scutil --get ComputerName 2>/dev/null || hostname)"
+  host="$(_host_id)"
   date_h="$(date '+%Y-%m-%d %H:%M:%S %Z')"
   priv="$( [ $IS_ROOT -eq 1 ] && echo 'root (deep scan)' || echo 'user' )"
   {
@@ -817,7 +827,7 @@ if [ "$WANT_JSON" -eq 1 ]; then
   {
     printf '{\n'
     printf '  "tool": "machunt",\n'
-    printf '  "host": "%s",\n' "$(scutil --get ComputerName 2>/dev/null || hostname)"
+    printf '  "host": "%s",\n' "$(_host_id)"
     printf '  "scanned_at": "%s",\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     printf '  "privileged": %s,\n' "$( [ $IS_ROOT -eq 1 ] && echo true || echo false )"
     printf '  "report_file": "%s",\n' "$REPORT"
